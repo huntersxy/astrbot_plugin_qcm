@@ -1,0 +1,32 @@
+{
+  "target_url": {
+    "description": "目标 URL",
+    "type": "string",
+    "default": "http://n2-6.yxsjmc.cn:20913/api/broadcast"
+  },
+  "target_groups": {
+    "description": "要监听的群 ID 列表",
+    "type": "list",
+    "default": []
+  },
+  "target_conversation_id": {
+    "description": "要转发消息的会话 ID 列表（通过 /get_umo 指令获取，多个ID用逗号分隔）",
+    "type": "string",
+    "default": ""
+  },
+  "aes_key": {
+    "description": "AES 加密密钥（对方服务鉴权用）",
+    "type": "string",
+    "default": ""
+  },
+  "message_prefix": {
+    "description": "消息前缀（用于验证消息来源，接收时会自动移除）",
+    "type": "string",
+    "default": ""
+  },
+  "http_port": {
+    "description": "HTTP 服务器端口",
+    "type": "int",
+    "default": 8080
+  }
+}
