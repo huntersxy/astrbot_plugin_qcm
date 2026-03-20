@@ -9,7 +9,7 @@ import base64
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
-@register("astrbot_plugin_qcm", "User", "监听指定群的消息并发送到指定 URL", "1.0.0")
+@register("astrbot_plugin_qcm", "汐兮雨 (Huntersxy)", "实现 QQ 群与 MC 服务器之间的消息互通", "1.0.0")
 class QCMPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
