@@ -2,7 +2,7 @@
   "target_url": {
     "description": "目标 URL",
     "type": "string",
-    "default": "http://localhost:8080/api/broadcast"
+    "default": "http://localhost:18080/api/broadcast"
   },
   "target_groups": {
     "description": "要监听的群 ID 列表",

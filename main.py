@@ -17,7 +17,7 @@ class QCMPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.target_url = config.get("target_url", "http://localhost:8080/api/broadcast")
+        self.target_url = config.get("target_url", "http://localhost:18080/api/broadcast")
         # 统一目标群 ID 为字符串类型
         target_groups = config.get("target_groups", [])
         self.target_groups = [str(group_id) for group_id in target_groups]
