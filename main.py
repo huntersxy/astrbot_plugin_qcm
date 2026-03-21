@@ -3,13 +3,9 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.message_components import Plain, Image, Face, At
 import aiohttp
-import asyncio
 from aiohttp import web
 import base64
-import os
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
 
 @register("astrbot_plugin_qcm", "汐兮雨 (Huntersxy)", "实现 QQ 群与 MC 服务器之间的消息互通", "1.0.0")
@@ -17,81 +13,74 @@ class QCMPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.target_url = config.get("target_url", "http://localhost:18080/api/broadcast")
-        # 统一目标群 ID 为字符串类型
-        target_groups = config.get("target_groups", [])
-        self.target_groups = [str(group_id) for group_id in target_groups]
+        self.target_url = config.get("target_url", "http://localhost:8080/api/broadcast")
+        self.target_groups = config.get("target_groups", [])
         self.aes_key = config.get("aes_key", "")
         self.message_prefix = config.get("message_prefix", "")
         self.http_port = config.get("http_port", 26333)
         self.http_server = None
-        self.client_session = None
-        self._derived_key = None
-        self._salt = None
         logger.info(f"QCM 插件初始化完成，目标 URL: {self.target_url}")
         logger.info(f"监听的群 ID: {self.target_groups}")
         logger.info(f"HTTP 服务器端口: {self.http_port}")
 
     def encrypt_aes(self, data):
-        """使用 AES-GCM 加密数据"""
+        """使用 AES 加密数据"""
         if not self.aes_key:
             return data
         
         try:
-            if not self._derived_key or not self._salt:
-                logger.error("密钥未初始化")
-                raise Exception("密钥未初始化")
+            # 确保密钥长度为 16、24 或 32 字节
+            key = self.aes_key.encode('utf-8')
+            key = key[:32]  # 截取前 32 字节
+            key = key.ljust(16, b'\x00')  # 不足 16 字节则填充
             
-            # 生成随机 nonce
-            nonce = os.urandom(12)  # GCM 推荐使用 12 字节 nonce
-            
-            # 使用 GCM 模式
-            cipher = Cipher(algorithms.AES(self._derived_key), modes.GCM(nonce), backend=default_backend())
+            # 使用 ECB 模式
+            cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
             encryptor = cipher.encryptor()
             
-            # 加密数据
-            ciphertext = encryptor.update(data.encode('utf-8')) + encryptor.finalize()
+            # 先编码为字节
+            data_bytes = data.encode('utf-8')
             
-            # 获取认证标签
-            tag = encryptor.tag
+            # PKCS7 填充
+            block_size = 16
+            padding = block_size - len(data_bytes) % block_size
+            padded_data = data_bytes + (bytes([padding]) * padding)
             
-            # 组合 salt、nonce、ciphertext 和 tag
-            encrypted = self._salt + nonce + ciphertext + tag
+            encrypted = encryptor.update(padded_data) + encryptor.finalize()
             return base64.b64encode(encrypted).decode('utf-8')
         except Exception as e:
             logger.error(f"AES 加密失败: {str(e)}")
-            raise
+            return data
 
     def decrypt_aes(self, data):
-        """使用 AES-GCM 解密数据"""
+        """使用 AES 解密数据"""
         if not self.aes_key:
             return data
         
         try:
+            # 确保密钥长度为 16、24 或 32 字节
+            key = self.aes_key.encode('utf-8')
+            key = key[:32]  # 截取前 32 字节
+            key = key.ljust(16, b'\x00')  # 不足 16 字节则填充
+            
+            # 使用 ECB 模式
+            cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+            decryptor = cipher.decryptor()
+            
             # 解码 base64
             encrypted_data = base64.b64decode(data)
             
-            # 提取 salt、nonce、ciphertext 和 tag
-            salt = encrypted_data[:16]
-            nonce = encrypted_data[16:28]
-            tag = encrypted_data[-16:]
-            ciphertext = encrypted_data[28:-16]
-            
-            if not self._derived_key:
-                logger.error("密钥未初始化")
-                raise Exception("密钥未初始化")
-            
-            # 使用 GCM 模式
-            cipher = Cipher(algorithms.AES(self._derived_key), modes.GCM(nonce, tag), backend=default_backend())
-            decryptor = cipher.decryptor()
-            
             # 解密
-            decrypted = decryptor.update(ciphertext) + decryptor.finalize()
+            decrypted = decryptor.update(encrypted_data) + decryptor.finalize()
+            
+            # 去除 PKCS7 填充
+            padding = decrypted[-1]
+            decrypted = decrypted[:-padding]
             
             return decrypted.decode('utf-8')
         except Exception as e:
             logger.error(f"AES 解密失败: {str(e)}")
-            raise
+            return data
 
     def get_targets(self):
         """获取目标会话 ID 列表"""
@@ -110,32 +99,12 @@ class QCMPlugin(Star):
                     targets.append(item_str)
         return targets
 
-    @filter.on_astrbot_loaded
-    async def on_loaded(self):
-        """插件加载时执行"""
-        # 派生并缓存密钥
-        if self.aes_key:
-            try:
-                # 生成固定的 salt（用于会话期间）
-                self._salt = os.urandom(16)
-                kdf = PBKDF2HMAC(
-                    algorithm=hashes.SHA256(),
-                    length=32,  # AES-256 密钥长度
-                    salt=self._salt,
-                    iterations=65536,  
-                    backend=default_backend()
-                )
-                self._derived_key = kdf.derive(self.aes_key.encode('utf-8'))
-                logger.info("AES 密钥派生完成")
-            except Exception as e:
-                logger.error(f"密钥派生失败: {str(e)}")
-        # 创建 ClientSession
-        self.client_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+    async def initialize(self):
+        """插件初始化方法"""
         # 初始化成功时发送连接成功消息
         await self.send_connection_success()
         # 启动 HTTP 服务器
         await self.start_http_server()
-        logger.info("QCM 插件加载完成")
 
     async def send_connection_success(self):
         """发送连接成功消息"""
@@ -143,19 +112,17 @@ class QCMPlugin(Star):
         # 添加消息前缀
         if self.message_prefix:
             post_data = self.message_prefix + post_data
+        # 加密数据
+        encrypted_data = self.encrypt_aes(post_data)
         try:
-            # 加密数据
-            encrypted_data = self.encrypt_aes(post_data)
-            if not self.client_session:
-                logger.error("ClientSession 未初始化，无法发送请求")
-                return
-            async with self.client_session.post(
-                self.target_url,
-                data=encrypted_data,
-                headers={"Content-Type": "text/plain; charset=utf-8"}
-            ) as response:
-                status = response.status
-                logger.info(f"发送连接成功消息到 {self.target_url}，状态码: {status}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.target_url,
+                    data=encrypted_data,
+                    headers={"Content-Type": "text/plain; charset=utf-8"}
+                ) as response:
+                    status = response.status
+                    logger.info(f"发送连接成功消息到 {self.target_url}，状态码: {status}")
         except Exception as e:
             logger.error(f"发送连接成功消息失败: {str(e)}")
 
@@ -167,8 +134,8 @@ class QCMPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
-        # 获取群 ID 并转换为字符串
-        group_id = str(event.message_obj.group_id)
+        # 获取群 ID
+        group_id = event.message_obj.group_id
         
         # 检查是否在监听列表中
         if group_id not in self.target_groups:
@@ -206,21 +173,19 @@ class QCMPlugin(Star):
         # 添加消息前缀
         if self.message_prefix:
             post_data = self.message_prefix + post_data
+        # 加密数据
+        encrypted_data = self.encrypt_aes(post_data)
         
         # 发送 POST 请求
         try:
-            # 加密数据
-            encrypted_data = self.encrypt_aes(post_data)
-            if not self.client_session:
-                logger.error("ClientSession 未初始化，无法发送请求")
-                return
-            async with self.client_session.post(
-                self.target_url,
-                data=encrypted_data,
-                headers={"Content-Type": "text/plain; charset=utf-8"}
-            ) as response:
-                status = response.status
-                logger.info(f"发送 POST 请求到 {self.target_url}，状态码: {status}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.target_url,
+                    data=encrypted_data,
+                    headers={"Content-Type": "text/plain; charset=utf-8"}
+                ) as response:
+                    status = response.status
+                    logger.info(f"发送 POST 请求到 {self.target_url}，状态码: {status}")
         except Exception as e:
             logger.error(f"发送 POST 请求失败: {str(e)}")
 
@@ -240,15 +205,8 @@ class QCMPlugin(Star):
     async def handle_broadcast(self, request):
         """处理广播请求"""
         try:
-            # 限制请求体大小为 1MB
-            MAX_BODY_SIZE = 1024 * 1024  # 1MB
-            content_length = request.content_length
-            if content_length and content_length > MAX_BODY_SIZE:
-                logger.warning(f"请求体过大: {content_length} 字节，超过限制 {MAX_BODY_SIZE} 字节")
-                return web.Response(text="Request body too large", status=413)
-            
             # 读取 POST 数据
-            data = await request.text(max_size=MAX_BODY_SIZE)
+            data = await request.text()
             logger.info(f"收到广播请求: {data}")
             
             # 解密数据
@@ -287,40 +245,18 @@ class QCMPlugin(Star):
         # 根据官方文档，使用 MessageChain 构建消息
         message_chain = MessageChain().message(message)
         
-        # 并发发送消息
-        async def send_to_target(target):
+        for target in targets:
             try:
                 # 直接使用配置中的真实 unified_msg_origin
                 await self.context.send_message(target, message_chain)
                 logger.info(f"已将消息转发到会话 {target}: {message}")
-                return True
-            except TypeError as e:
-                # 处理类型错误，可能是因为target需要是特定对象类型
-                logger.error(f"转发消息到会话 {target} 类型错误: {str(e)}")
-                logger.error("请确保配置的 target_conversation_id 格式正确")
-                return False
             except Exception as e:
                 logger.error(f"转发消息到会话 {target} 失败: {str(e)}")
-                return False
-        
-        # 使用 asyncio.gather 并发执行
-        results = await asyncio.gather(*(send_to_target(target) for target in targets), return_exceptions=True)
-        
-        # 统计成功和失败的数量
-        success_count = sum(1 for result in results if result is True)
-        fail_count = len(targets) - success_count
-        if fail_count > 0:
-            logger.warning(f"消息转发完成，成功: {success_count}, 失败: {fail_count}")
 
-    @filter.on_astrbot_unloaded
-    async def on_unloaded(self):
-        """插件卸载时执行"""
+    async def terminate(self):
+        """插件停止方法"""
         # 停止 HTTP 服务器
         if self.http_server:
             await self.http_server.cleanup()
             logger.info("HTTP 服务器已停止")
-        # 关闭 ClientSession
-        if self.client_session:
-            await self.client_session.close()
-            logger.info("ClientSession 已关闭")
-        logger.info("QCM 插件已卸载")
+        logger.info("QCM 插件已停止")
