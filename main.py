@@ -6,7 +6,10 @@ import aiohttp
 import asyncio
 from aiohttp import web
 import base64
+import os
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
 
 @register("astrbot_plugin_qcm", "汐兮雨 (Huntersxy)", "实现 QQ 群与 MC 服务器之间的消息互通", "1.0.0")
@@ -23,6 +26,8 @@ class QCMPlugin(Star):
         self.http_port = config.get("http_port", 26333)
         self.http_server = None
         self.client_session = None
+        self._derived_key = None
+        self._salt = None
         logger.info(f"QCM 插件初始化完成，目标 URL: {self.target_url}")
         logger.info(f"监听的群 ID: {self.target_groups}")
         logger.info(f"HTTP 服务器端口: {self.http_port}")
@@ -33,26 +38,15 @@ class QCMPlugin(Star):
             return data
         
         try:
-            # 使用 PBKDF2 生成固定长度的密钥
-            from cryptography.hazmat.primitives import hashes
-            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-            import os
-            
-            salt = os.urandom(16)
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,  # AES-256 密钥长度
-                salt=salt,
-                iterations=100000,
-                backend=default_backend()
-            )
-            key = kdf.derive(self.aes_key.encode('utf-8'))
+            if not self._derived_key or not self._salt:
+                logger.error("密钥未初始化")
+                raise Exception("密钥未初始化")
             
             # 生成随机 nonce
             nonce = os.urandom(12)  # GCM 推荐使用 12 字节 nonce
             
             # 使用 GCM 模式
-            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce), backend=default_backend())
+            cipher = Cipher(algorithms.AES(self._derived_key), modes.GCM(nonce), backend=default_backend())
             encryptor = cipher.encryptor()
             
             # 加密数据
@@ -62,11 +56,11 @@ class QCMPlugin(Star):
             tag = encryptor.tag
             
             # 组合 salt、nonce、ciphertext 和 tag
-            encrypted = salt + nonce + ciphertext + tag
+            encrypted = self._salt + nonce + ciphertext + tag
             return base64.b64encode(encrypted).decode('utf-8')
         except Exception as e:
             logger.error(f"AES 加密失败: {str(e)}")
-            return data
+            raise
 
     def decrypt_aes(self, data):
         """使用 AES-GCM 解密数据"""
@@ -83,21 +77,12 @@ class QCMPlugin(Star):
             tag = encrypted_data[-16:]
             ciphertext = encrypted_data[28:-16]
             
-            # 使用 PBKDF2 生成密钥
-            from cryptography.hazmat.primitives import hashes
-            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-            
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,  # AES-256 密钥长度
-                salt=salt,
-                iterations=100000,
-                backend=default_backend()
-            )
-            key = kdf.derive(self.aes_key.encode('utf-8'))
+            if not self._derived_key:
+                logger.error("密钥未初始化")
+                raise Exception("密钥未初始化")
             
             # 使用 GCM 模式
-            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend())
+            cipher = Cipher(algorithms.AES(self._derived_key), modes.GCM(nonce, tag), backend=default_backend())
             decryptor = cipher.decryptor()
             
             # 解密
@@ -125,14 +110,32 @@ class QCMPlugin(Star):
                     targets.append(item_str)
         return targets
 
-    async def initialize(self):
-        """插件初始化方法"""
+    @filter.on_astrbot_loaded
+    async def on_loaded(self):
+        """插件加载时执行"""
+        # 派生并缓存密钥
+        if self.aes_key:
+            try:
+                # 生成固定的 salt（用于会话期间）
+                self._salt = os.urandom(16)
+                kdf = PBKDF2HMAC(
+                    algorithm=hashes.SHA256(),
+                    length=32,  # AES-256 密钥长度
+                    salt=self._salt,
+                    iterations=65536,  
+                    backend=default_backend()
+                )
+                self._derived_key = kdf.derive(self.aes_key.encode('utf-8'))
+                logger.info("AES 密钥派生完成")
+            except Exception as e:
+                logger.error(f"密钥派生失败: {str(e)}")
         # 创建 ClientSession
         self.client_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
         # 初始化成功时发送连接成功消息
         await self.send_connection_success()
         # 启动 HTTP 服务器
         await self.start_http_server()
+        logger.info("QCM 插件加载完成")
 
     async def send_connection_success(self):
         """发送连接成功消息"""
@@ -140,9 +143,12 @@ class QCMPlugin(Star):
         # 添加消息前缀
         if self.message_prefix:
             post_data = self.message_prefix + post_data
-        # 加密数据
-        encrypted_data = self.encrypt_aes(post_data)
         try:
+            # 加密数据
+            encrypted_data = self.encrypt_aes(post_data)
+            if not self.client_session:
+                logger.error("ClientSession 未初始化，无法发送请求")
+                return
             async with self.client_session.post(
                 self.target_url,
                 data=encrypted_data,
@@ -200,11 +206,14 @@ class QCMPlugin(Star):
         # 添加消息前缀
         if self.message_prefix:
             post_data = self.message_prefix + post_data
-        # 加密数据
-        encrypted_data = self.encrypt_aes(post_data)
         
         # 发送 POST 请求
         try:
+            # 加密数据
+            encrypted_data = self.encrypt_aes(post_data)
+            if not self.client_session:
+                logger.error("ClientSession 未初始化，无法发送请求")
+                return
             async with self.client_session.post(
                 self.target_url,
                 data=encrypted_data,
@@ -285,6 +294,11 @@ class QCMPlugin(Star):
                 await self.context.send_message(target, message_chain)
                 logger.info(f"已将消息转发到会话 {target}: {message}")
                 return True
+            except TypeError as e:
+                # 处理类型错误，可能是因为target需要是特定对象类型
+                logger.error(f"转发消息到会话 {target} 类型错误: {str(e)}")
+                logger.error("请确保配置的 target_conversation_id 格式正确")
+                return False
             except Exception as e:
                 logger.error(f"转发消息到会话 {target} 失败: {str(e)}")
                 return False
@@ -298,8 +312,9 @@ class QCMPlugin(Star):
         if fail_count > 0:
             logger.warning(f"消息转发完成，成功: {success_count}, 失败: {fail_count}")
 
-    async def terminate(self):
-        """插件停止方法"""
+    @filter.on_astrbot_unloaded
+    async def on_unloaded(self):
+        """插件卸载时执行"""
         # 停止 HTTP 服务器
         if self.http_server:
             await self.http_server.cleanup()
@@ -308,4 +323,4 @@ class QCMPlugin(Star):
         if self.client_session:
             await self.client_session.close()
             logger.info("ClientSession 已关闭")
-        logger.info("QCM 插件已停止")
+        logger.info("QCM 插件已卸载")
