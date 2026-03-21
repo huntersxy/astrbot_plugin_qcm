@@ -1,6 +1,6 @@
 name: astrbot_plugin_qcm
 display_name: QQ Connect Minecraft 插件
-desc: 实现 QQ 群与 MC 服务器之间的消息互通
+desc: 定时监听指定群的消息并发送到MC服务器，同时接收MC服务器的消息并转发到群。
 version: v1.0.0
-author: 汐兮雨 (Huntersxy)
+author: Huntersxy
 repo: https://github.com/huntersxy/astrbot_plugin_qcm
